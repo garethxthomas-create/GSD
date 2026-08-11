@@ -1,0 +1,62 @@
+name: GSD briefs
+
+on:
+  schedule:
+    # UTC. Ashburn VA is UTC-4 (EDT) / UTC-5 (EST).
+    - cron: "0 12 * * *"   # 8:00am EDT — morning brief
+    - cron: "30 18 * * *"  # 2:30pm EDT — midday check-in
+    - cron: "0 21 * * *"   # 5:00pm EDT — evening review
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Which brief to run"
+        type: choice
+        options: [morning, midday, evening]
+        default: morning
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    env:
+      GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Work out which brief this is
+        id: mode
+        run: |
+          if [ -n "${{ github.event.inputs.mode }}" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 12 * * *" ]; then
+            echo "mode=morning" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "30 18 * * *" ]; then
+            echo "mode=midday" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=evening" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate brief and send push
+        id: brief
+        env:
+          TODOIST_TOKEN: ${{ secrets.TODOIST_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          MODE: ${{ steps.mode.outputs.mode }}
+        run: node scripts/brief.mjs
+
+      - name: Email the brief
+        if: env.GMAIL_ADDRESS != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.GMAIL_ADDRESS }}
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          from: GSD
+          to: ${{ secrets.GMAIL_ADDRESS }}
+          subject: ${{ steps.brief.outputs.subject }}
+          body: file://brief_out.md
