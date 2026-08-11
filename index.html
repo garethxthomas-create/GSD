@@ -125,13 +125,24 @@ function saveConfig() {
 }
 
 async function td(path, opts = {}) {
-  const res = await fetch("https://api.todoist.com" + path, {
+  const res = await fetch("https://api.todoist.com/api/v1" + path, {
     ...opts,
     headers: { Authorization: "Bearer " + cfg.todoist, "Content-Type": "application/json", ...(opts.headers || {}) },
   });
   if (!res.ok) throw new Error("Todoist " + res.status);
   const t = await res.text();
   return t ? JSON.parse(t) : null;
+}
+
+// List endpoints are paginated: { results: [...], next_cursor }
+async function tdList(path) {
+  let items = [], cursor = null;
+  do {
+    const page = await td(path + "?limit=200" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
+    items = items.concat(page.results || []);
+    cursor = page.next_cursor || null;
+  } while (cursor);
+  return items;
 }
 
 async function claude(system, user, maxTokens = 900) {
@@ -159,7 +170,7 @@ const ignored = t => t.project_id === pitId || t.labels.includes("reference");
 async function loadTasks() {
   if (!cfg.todoist) { toggleSettings(); return; }
   try {
-    const [projs, tasks] = await Promise.all([td("/rest/v2/projects"), td("/rest/v2/tasks")]);
+    const [projs, tasks] = await Promise.all([tdList("/projects"), tdList("/tasks")]);
     projects = Object.fromEntries(projs.map(p => [p.id, p.name]));
     pitId = (projs.find(p => p.name.includes("Pit of Doom")) || {}).id;
     allTasks = tasks.filter(t => !ignored(t));
@@ -213,7 +224,7 @@ function render() {
 const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 async function completeTask(id) {
-  await td(`/rest/v2/tasks/${id}/close`, { method: "POST" });
+  await td(`/tasks/${id}/close`, { method: "POST" });
   if (currentTask?.id === id) { currentTask = null; stopTimer(); }
   await loadTasks();
 }
@@ -230,7 +241,7 @@ async function capture() {
   const v = $("captureInput").value.trim();
   if (!v) return;
   $("captureInput").value = "";
-  await td("/rest/v2/tasks", { method: "POST", body: JSON.stringify({ content: v }) });
+  await td("/tasks", { method: "POST", body: JSON.stringify({ content: v }) });
 }
 
 // ---- Claude flows ----
