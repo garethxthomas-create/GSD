@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GSD</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #181b22; --card2: #1f232d; --text: #e8eaf0;
+    --muted: #8b93a7; --accent: #4f8cff; --good: #3ecf8e; --warn: #f5a623;
+    --bad: #e5544b; --border: #2a2f3a; --radius: 14px;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 16px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; padding: 16px; max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 20px; letter-spacing: .5px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; margin-top: 12px; }
+  button { background: var(--card2); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 8px 14px; font-size: 14px; cursor: pointer; }
+  button:active { transform: scale(.97); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.good { background: var(--good); border-color: var(--good); color: #08281a; font-weight: 700; }
+  button.danger { background: transparent; border-color: var(--bad); color: var(--bad); }
+  input, textarea { width: 100%; background: var(--card2); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 15px; margin-top: 6px; }
+  .task { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-top: 1px solid var(--border); }
+  .task:first-of-type { border-top: none; }
+  .tnum { font-size: 22px; font-weight: 800; color: var(--accent); min-width: 26px; }
+  .tname { font-weight: 600; }
+  .tmeta { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .taction { font-size: 14px; color: var(--good); margin-top: 4px; }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--border); color: var(--muted); margin-right: 6px; }
+  .pill.p1 { color: var(--bad); border-color: var(--bad); }
+  .pill.strike { color: var(--warn); border-color: var(--warn); }
+  #timerDisplay { font-size: 44px; font-weight: 800; text-align: center; font-variant-numeric: tabular-nums; }
+  .bar { height: 8px; background: var(--card2); border-radius: 99px; overflow: hidden; margin-top: 10px; }
+  .bar > div { height: 100%; background: var(--good); width: 0%; transition: width .5s; }
+  #coach { white-space: pre-wrap; font-size: 14px; background: var(--card2); border-radius: 10px; padding: 12px; margin-top: 10px; display: none; }
+  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .hidden { display: none !important; }
+  a { color: var(--accent); }
+  .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="row">
+  <h1>GSD</h1>
+  <div class="row" style="gap:6px">
+    <span class="muted" id="dateLabel"></span>
+    <button onclick="loadTasks()" title="Refresh">&#8635;</button>
+    <button onclick="toggleSettings()" title="Settings">&#9881;</button>
+  </div>
+</div>
+
+<div class="card hidden" id="settings">
+  <strong>Setup</strong>
+  <p class="muted">Keys are stored only in this browser, never sent anywhere except Todoist and Anthropic directly.</p>
+  <label class="muted">Todoist API token (Todoist &rarr; Settings &rarr; Integrations &rarr; Developer)</label>
+  <input id="cfgTodoist" type="password" placeholder="Todoist token">
+  <label class="muted">Anthropic API key (console.anthropic.com)</label>
+  <input id="cfgAnthropic" type="password" placeholder="sk-ant-...">
+  <label class="muted">Claude model</label>
+  <input id="cfgModel" placeholder="claude-sonnet-4-5">
+  <div class="btnrow"><button class="primary" onclick="saveConfig()">Save</button></div>
+</div>
+
+<div class="card" id="focusCard">
+  <div class="row"><strong>Focus</strong><span class="muted" id="focusTaskLabel">no task selected</span></div>
+  <div id="timerDisplay">00:00</div>
+  <div class="bar"><div id="focusBar"></div></div>
+  <div class="muted" style="text-align:center; margin-top:4px"><span id="focusTotal">0</span> of 90 focused minutes today</div>
+  <div class="btnrow" style="justify-content:center">
+    <button class="primary" id="timerBtn" onclick="toggleTimer()">START</button>
+    <button class="good" onclick="doneCurrent()">DONE</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <strong>Today's Three</strong>
+    <button onclick="planDay()" id="planBtn">Plan my day</button>
+  </div>
+  <div id="three"><p class="muted">Loading&hellip;</p></div>
+  <div id="coach"></div>
+  <div class="btnrow">
+    <button onclick="shtf()">SHTF</button>
+    <button onclick="avoiding()">Avoiding</button>
+  </div>
+</div>
+
+<div class="card">
+  <strong>Capture</strong>
+  <input id="captureInput" placeholder="Anything on your mind &rarr; Inbox" onkeydown="if(event.key==='Enter')capture()">
+</div>
+
+<div class="card">
+  <div class="row"><strong>Also today</strong><span class="muted" id="restCount"></span></div>
+  <div id="rest"></div>
+</div>
+
+<p class="muted" style="margin-top:14px; text-align:center">GSD &middot; Todoist is the source of truth &middot; the Pit is ignored</p>
+
+<script>
+const LS = "gsd_config";
+let cfg = JSON.parse(localStorage.getItem(LS) || "{}");
+let allTasks = [], projects = {}, pitId = null;
+let three = [], currentTask = null, plan = null;
+
+const $ = id => document.getElementById(id);
+$("dateLabel").textContent = new Date().toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+
+function toggleSettings() {
+  const s = $("settings");
+  s.classList.toggle("hidden");
+  $("cfgTodoist").value = cfg.todoist || "";
+  $("cfgAnthropic").value = cfg.anthropic || "";
+  $("cfgModel").value = cfg.model || "claude-sonnet-4-5";
+}
+function saveConfig() {
+  cfg = { todoist: $("cfgTodoist").value.trim(), anthropic: $("cfgAnthropic").value.trim(), model: $("cfgModel").value.trim() || "claude-sonnet-4-5" };
+  localStorage.setItem(LS, JSON.stringify(cfg));
+  $("settings").classList.add("hidden");
+  loadTasks();
+}
+
+async function td(path, opts = {}) {
+  const res = await fetch("https://api.todoist.com" + path, {
+    ...opts,
+    headers: { Authorization: "Bearer " + cfg.todoist, "Content-Type": "application/json", ...(opts.headers || {}) },
+  });
+  if (!res.ok) throw new Error("Todoist " + res.status);
+  const t = await res.text();
+  return t ? JSON.parse(t) : null;
+}
+
+async function claude(system, user, maxTokens = 900) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": cfg.anthropic,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: cfg.model || "claude-sonnet-4-5", max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] }),
+  });
+  if (!res.ok) throw new Error("Anthropic " + res.status);
+  const d = await res.json();
+  return d.content.map(c => c.text || "").join("");
+}
+
+const SYSTEM = 'You are GSD, a direct, warm, zero-shame productivity coach. No corporate language, no em dashes, US spelling. Every task gets one concrete first physical action and an estimate in minutes. Answer in plain short text that fits on a phone.';
+
+const today = () => new Date().toLocaleDateString("en-CA");
+const strikes = t => { for (let i = 3; i >= 1; i--) if (t.labels.includes("gsd-strike-" + i)) return i; return 0; };
+const ignored = t => t.project_id === pitId || t.labels.includes("reference");
+
+async function loadTasks() {
+  if (!cfg.todoist) { toggleSettings(); return; }
+  try {
+    const [projs, tasks] = await Promise.all([td("/rest/v2/projects"), td("/rest/v2/tasks")]);
+    projects = Object.fromEntries(projs.map(p => [p.id, p.name]));
+    pitId = (projs.find(p => p.name.includes("Pit of Doom")) || {}).id;
+    allTasks = tasks.filter(t => !ignored(t));
+    pickThree();
+    render();
+  } catch (e) {
+    $("three").innerHTML = '<p class="muted">Could not reach Todoist. Check your token in settings.</p>';
+  }
+}
+
+function pickThree() {
+  const t0 = today();
+  const cand = allTasks
+    .filter(t => (t.due && t.due.date <= t0) || t.priority === 4 || strikes(t) > 0)
+    .sort((a, b) => (b.priority - a.priority) || (strikes(b) - strikes(a)) || ((a.due?.date || "9") < (b.due?.date || "9") ? -1 : 1));
+  three = cand.slice(0, 3);
+  if (!currentTask && three[0]) currentTask = three[0];
+}
+
+function taskRow(t, i) {
+  const s = strikes(t);
+  const p = 5 - t.priority;
+  const act = plan?.find(x => x.id === t.id);
+  return `<div class="task">
+    <div class="tnum">${i != null ? i + 1 : "&middot;"}</div>
+    <div style="flex:1">
+      <div class="tname">${esc(t.content)}</div>
+      <div class="tmeta">
+        ${p === 1 ? '<span class="pill p1">P1</span>' : `<span class="pill">P${p}</span>`}
+        ${s ? `<span class="pill strike">${s} strike${s > 1 ? "s" : ""}</span>` : ""}
+        <span class="pill">${esc(projects[t.project_id] || "")}</span>
+      </div>
+      ${act ? `<div class="taction">&rarr; ${esc(act.first_action)} (~${act.estimate_min} min)</div>` : ""}
+    </div>
+    <div style="display:flex; flex-direction:column; gap:6px">
+      <button class="good" onclick="completeTask('${t.id}')">Done</button>
+      <button onclick="focusOn('${t.id}')">Focus</button>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const t0 = today();
+  $("three").innerHTML = three.length ? three.map((t, i) => taskRow(t, i)).join("") : '<p class="muted">Nothing due. Capture something or enjoy it.</p>';
+  const rest = allTasks.filter(t => t.due && t.due.date <= t0 && !three.includes(t));
+  $("rest").innerHTML = rest.map(t => taskRow(t)).join("") || '<p class="muted">Nothing else today.</p>';
+  $("restCount").textContent = rest.length ? rest.length + " tasks" : "";
+  $("focusTaskLabel").textContent = currentTask ? currentTask.content : "no task selected";
+}
+
+const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function completeTask(id) {
+  await td(`/rest/v2/tasks/${id}/close`, { method: "POST" });
+  if (currentTask?.id === id) { currentTask = null; stopTimer(); }
+  await loadTasks();
+}
+
+function focusOn(id) {
+  currentTask = allTasks.find(t => t.id === id) || null;
+  $("focusTaskLabel").textContent = currentTask ? currentTask.content : "no task selected";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function doneCurrent() { if (currentTask) await completeTask(currentTask.id); }
+
+async function capture() {
+  const v = $("captureInput").value.trim();
+  if (!v) return;
+  $("captureInput").value = "";
+  await td("/rest/v2/tasks", { method: "POST", body: JSON.stringify({ content: v }) });
+}
+
+// ---- Claude flows ----
+function showCoach(text) { const c = $("coach"); c.style.display = "block"; c.textContent = text; }
+
+function briefTasks(list) {
+  return list.map(t => ({ id: t.id, task: t.content, project: projects[t.project_id], priority: "p" + (5 - t.priority), due: t.due?.date || null, strikes: strikes(t) }));
+}
+
+async function planDay() {
+  if (!cfg.anthropic) { toggleSettings(); return; }
+  $("planBtn").innerHTML = '<span class="spin">&#8635;</span>';
+  try {
+    const raw = await claude(SYSTEM + ' Reply with ONLY valid JSON: {"three":[{"id":"...","first_action":"...","estimate_min":30}],"note":"one sentence"}',
+      "Pick Today's Three and first actions from: " + JSON.stringify(briefTasks(allTasks.filter(t => (t.due && t.due.date <= today()) || t.priority === 4 || !t.due))));
+    const j = JSON.parse(raw.replace(/^[^{]*/, "").replace(/[^}]*$/, ""));
+    plan = j.three;
+    three = j.three.map(x => allTasks.find(t => t.id === x.id)).filter(Boolean);
+    if (three[0]) currentTask = three[0];
+    render();
+    showCoach(j.note || "Planned.");
+  } catch (e) { showCoach("Planning failed: " + e.message); }
+  $("planBtn").textContent = "Plan my day";
+}
+
+async function shtf() {
+  const what = prompt("What changed?");
+  if (!what) return;
+  showCoach("Replanning…");
+  try {
+    const out = await claude(SYSTEM, `The day detonated: "${what}". Remaining today: ${JSON.stringify(briefTasks(allTasks.filter(t => t.due && t.due.date <= today())))}. Rebuild the rest of the day: what to drop, what to keep, one next action. The plan changed, they didn't fail it. Max 90 words.`);
+    showCoach(out);
+  } catch (e) { showCoach("Failed: " + e.message); }
+}
+
+async function avoiding() {
+  const t = currentTask || three[0];
+  if (!t) return showCoach("Pick a task first.");
+  showCoach("Thinking…");
+  try {
+    const out = await claude(SYSTEM, `Gareth is avoiding "${t.content}" (strikes: ${strikes(t)}) and drifting toward distraction. Externalize what the resistance is probably saying in one line, then give exactly one physical move of ten minutes or less to start. Max 60 words.`);
+    showCoach(out);
+  } catch (e) { showCoach("Failed: " + e.message); }
+}
+
+// ---- Timer ----
+let timerOn = false, timerStart = 0, elapsed = 0, tick = null;
+let focusToday = Number(sessionStorage.getItem("gsd_focus_" + today()) || 0);
+$("focusTotal").textContent = Math.round(focusToday / 60);
+updateBar();
+
+function toggleTimer() { timerOn ? stopTimer() : startTimer(); }
+function startTimer() {
+  timerOn = true; timerStart = Date.now();
+  $("timerBtn").textContent = "PAUSE"; $("timerBtn").classList.remove("primary");
+  tick = setInterval(renderTimer, 1000);
+}
+function stopTimer() {
+  if (!timerOn) return;
+  timerOn = false;
+  clearInterval(tick);
+  const s = Math.floor((Date.now() - timerStart) / 1000);
+  elapsed += s; focusToday += s;
+  sessionStorage.setItem("gsd_focus_" + today(), focusToday);
+  $("timerBtn").textContent = "START"; $("timerBtn").classList.add("primary");
+  $("focusTotal").textContent = Math.round(focusToday / 60);
+  updateBar();
+}
+function renderTimer() {
+  const s = elapsed + Math.floor((Date.now() - timerStart) / 1000);
+  $("timerDisplay").textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+  updateBar(s - elapsed);
+}
+function updateBar(extra = 0) {
+  $("focusBar").style.width = Math.min(100, ((focusToday + extra) / 5400) * 100) + "%";
+}
+
+loadTasks();
+</script>
+</body>
+</html>
