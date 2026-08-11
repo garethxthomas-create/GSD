@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // GSD brief generator — runs in GitHub Actions on a schedule (or manually).
 // Modes: morning (plan the day), midday (check-in), evening (review + strikes).
-// Talks to Todoist REST/Sync APIs and the Anthropic API. No npm dependencies.
+// Uses the Todoist unified API (/api/v1) and the Anthropic API. No npm dependencies.
 
 const TODOIST_TOKEN = need("TODOIST_TOKEN");
 const ANTHROPIC_API_KEY = need("ANTHROPIC_API_KEY");
@@ -33,9 +33,9 @@ function localDate(offsetDays = 0) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(d); // YYYY-MM-DD
 }
 
-// ---------- Todoist ----------
+// ---------- Todoist (unified API, /api/v1) ----------
 async function todoist(path, opts = {}) {
-  const res = await fetch(`https://api.todoist.com${path}`, {
+  const res = await fetch(`https://api.todoist.com/api/v1${path}`, {
     ...opts,
     headers: {
       Authorization: `Bearer ${TODOIST_TOKEN}`,
@@ -48,23 +48,23 @@ async function todoist(path, opts = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-async function syncCommands(commands) {
-  const res = await fetch("https://api.todoist.com/sync/v9/sync", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${TODOIST_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ commands }),
-  });
-  if (!res.ok) throw new Error(`Todoist sync: ${res.status} ${await res.text()}`);
-  return res.json();
+// List endpoints are paginated: { results: [...], next_cursor: "..." }
+async function todoistList(path) {
+  const sep = path.includes("?") ? "&" : "?";
+  let items = [], cursor = null;
+  do {
+    const page = await todoist(`${path}${sep}limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    items = items.concat(page.results || page.items || []);
+    cursor = page.next_cursor || null;
+  } while (cursor);
+  return items;
 }
-
-const uuid = () => crypto.randomUUID();
 
 async function getState() {
   const [projects, tasks, labels] = await Promise.all([
-    todoist("/rest/v2/projects"),
-    todoist("/rest/v2/tasks"),
-    todoist("/rest/v2/labels"),
+    todoistList("/projects"),
+    todoistList("/tasks"),
+    todoistList("/labels"),
   ]);
   const pit = projects.find(p => p.name.includes(PIT_NAME)) || null;
   const projById = Object.fromEntries(projects.map(p => [p.id, p]));
@@ -74,7 +74,7 @@ async function getState() {
 async function ensureStrikeLabels(existing) {
   const have = new Set(existing.map(l => l.name));
   for (const name of STRIKE_LABELS) {
-    if (!have.has(name)) await todoist("/rest/v2/labels", { method: "POST", body: JSON.stringify({ name }) });
+    if (!have.has(name)) await todoist("/labels", { method: "POST", body: JSON.stringify({ name }) });
   }
 }
 
@@ -91,27 +91,28 @@ async function addStrike(task, pit) {
   const n = strikeCount(task);
   if (n >= 3) return 3;
   const labels = task.labels.filter(l => !STRIKE_LABELS.includes(l)).concat(STRIKE_LABELS[n]);
-  await todoist(`/rest/v2/tasks/${task.id}`, { method: "POST", body: JSON.stringify({ labels }) });
+  await todoist(`/tasks/${task.id}`, { method: "POST", body: JSON.stringify({ labels }) });
   const total = n + 1;
   if (total >= 3 && pit) {
-    await syncCommands([{ type: "item_move", uuid: uuid(), args: { id: task.id, project_id: pit.id } }]);
+    await todoist(`/tasks/${task.id}/move`, { method: "POST", body: JSON.stringify({ project_id: pit.id }) });
   }
   return total;
 }
 
 async function reschedule(task, dueString) {
   if (task.due?.is_recurring) return; // never touch recurrence
-  await todoist(`/rest/v2/tasks/${task.id}`, { method: "POST", body: JSON.stringify({ due_string: dueString }) });
+  await todoist(`/tasks/${task.id}`, { method: "POST", body: JSON.stringify({ due_string: dueString }) });
 }
 
 async function completedToday() {
-  const since = `${localDate(0)}T00:00`;
-  const res = await fetch(`https://api.todoist.com/sync/v9/completed/get_all?since=${encodeURIComponent(since)}&limit=100`, {
-    headers: { Authorization: `Bearer ${TODOIST_TOKEN}` },
-  });
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data.items || [];
+  try {
+    const since = `${localDate(0)}T00:00:00`;
+    const until = `${localDate(1)}T00:00:00`;
+    return await todoistList(`/tasks/completed/by_completion_date?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
+  } catch (e) {
+    console.error("completedToday failed:", e.message);
+    return [];
+  }
 }
 
 // ---------- Claude ----------
@@ -167,7 +168,7 @@ async function morning(state) {
     notes.push(`"${t.content}" was overdue: moved to today, strike ${n}.`);
   }
 
-  const fresh = await todoist("/rest/v2/tasks");
+  const fresh = await todoistList("/tasks");
   const candidates = taskSummary(fresh, projById, pit).filter(t => (t.due && t.due <= today) || t.priority === "p1" || t.strikes > 0);
   const backlog = taskSummary(fresh, projById, pit).filter(t => !t.due).slice(0, 20);
 
