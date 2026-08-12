@@ -105,7 +105,7 @@
     <button class="primary" id="bdBtn" onclick="breakdown()">Break it down</button>
     <button class="good hidden" id="bdCreate" onclick="createBreakdown()">Create in Todoist</button>
   </div>
-  <div id="bdPreview" style="display:none; white-space:pre-wrap; font-size:14px; background:var(--card2); border-radius:10px; padding:12px; margin-top:10px"></div>
+  <div id="bdPreview" style="display:none; font-size:14px; background:var(--card2); border-radius:10px; padding:12px; margin-top:10px"></div>
 </div>
 
 <div class="card">
@@ -305,42 +305,111 @@ async function avoiding() {
 
 // ---- Breakdown ----
 let bdPlan = null;
+const BD_JSON = ' Reply with ONLY valid JSON, no prose: {"project":"short name","chunks":[{"name":"chunk name","tasks":[{"content":"task starting with a physical verb","estimate_min":30}]}]}. 3 to 6 chunks, 2 to 5 tasks each, in doing order. The very first task must be startable in under 10 minutes.';
+
 async function breakdown() {
   const v = $("bdInput").value.trim();
   if (!v) return;
   if (!cfg.anthropic) { toggleSettings(); return; }
   $("bdBtn").innerHTML = '<span class="spin">&#8635;</span>';
   try {
-    const raw = await claude(SYSTEM + ' Reply with ONLY valid JSON, no prose: {"project":"short name","chunks":[{"name":"chunk name","tasks":[{"content":"task starting with a physical verb","estimate_min":30}]}]}. 3 to 6 chunks, 2 to 5 tasks each, in doing order. The very first task must be startable in under 10 minutes.',
-      "Break down this project into chunks and tasks: " + v, 1500);
+    const raw = await claude(SYSTEM + BD_JSON, "Break down this project into chunks and tasks: " + v, 1500);
     bdPlan = JSON.parse(raw.replace(/^[^{]*/, "").replace(/[^}]*$/, ""));
-    let txt = bdPlan.project + "\n";
-    bdPlan.chunks.forEach((c, i) => {
-      txt += `\n${i + 1}. ${c.name}\n`;
-      c.tasks.forEach(t => { txt += `   • ${t.content} (~${t.estimate_min}m)\n`; });
-    });
-    txt += "\nFirst task gets dated today. Nothing else gets a date yet; that's deliberate.";
-    const p = $("bdPreview"); p.style.display = "block"; p.textContent = txt;
+    bdPlan.chunks.forEach(c => c.tasks.forEach(t => { t.due = t.due || ""; }));
+    if (bdPlan.chunks[0]?.tasks[0]) bdPlan.chunks[0].tasks[0].due = today(); // prefilled, editable
+    bdRender();
     $("bdCreate").classList.remove("hidden");
   } catch (e) { const p = $("bdPreview"); p.style.display = "block"; p.textContent = "Breakdown failed: " + e.message; }
   $("bdBtn").textContent = "Break it down";
 }
 
+function bdRender() {
+  const p = $("bdPreview"); p.style.display = "block";
+  const projOptions = Object.entries(projects).filter(([id]) => id !== pitId)
+    .map(([id, name]) => `<option value="${id}">${esc(name)}</option>`).join("");
+  let h = `<div class="row" style="flex-wrap:wrap; gap:6px">
+    <input id="bdProjName" value="${esc(bdPlan.project)}" style="flex:1; min-width:140px; margin:0; font-weight:600">
+    <select id="bdDest" style="background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:10px; padding:9px">
+      <option value="new">&#10133; New project</option>${projOptions}
+    </select></div>`;
+  bdPlan.chunks.forEach((c, i) => {
+    h += `<div style="margin-top:12px">
+      <div class="row" style="gap:6px">
+        <input id="bdChunk_${i}" value="${esc(c.name)}" style="flex:1; margin:0; color:var(--accent); font-weight:600">
+        <button onclick="redoChunk(${i})" title="Re-break just this chunk" id="bdRedo_${i}">&#8635;</button>
+        <button class="danger" onclick="bdDelChunk(${i})" title="Remove chunk">&#10005;</button>
+      </div>`;
+    c.tasks.forEach((t, j) => {
+      h += `<div class="row" style="gap:6px; margin-top:6px; flex-wrap:wrap">
+        <input id="bdTask_${i}_${j}" value="${esc(t.content)}" style="flex:1; min-width:150px; margin:0">
+        <input id="bdEst_${i}_${j}" type="number" value="${t.estimate_min || 30}" min="5" step="5" title="minutes" style="width:64px; margin:0">
+        <input id="bdDue_${i}_${j}" type="date" value="${t.due || ""}" title="due date (optional)" style="width:135px; margin:0">
+        <button class="danger" onclick="bdDelTask(${i},${j})">&#10005;</button></div>`;
+    });
+    h += `<button style="margin-top:6px; font-size:13px" onclick="bdAddTask(${i})">+ task</button></div>`;
+  });
+  h += `<p class="muted" style="margin-top:10px">Everything is editable. Dates are optional; only date what you're committing to. Minutes go in the task's note.</p>`;
+  p.innerHTML = h;
+}
+
+function bdReadDom() {
+  if (!bdPlan) return;
+  bdPlan.project = $("bdProjName")?.value.trim() || bdPlan.project;
+  bdPlan.chunks.forEach((c, i) => {
+    c.name = $(`bdChunk_${i}`)?.value.trim() || c.name;
+    c.tasks.forEach((t, j) => {
+      t.content = $(`bdTask_${i}_${j}`)?.value.trim() || t.content;
+      t.estimate_min = Number($(`bdEst_${i}_${j}`)?.value) || t.estimate_min;
+      t.due = $(`bdDue_${i}_${j}`)?.value || "";
+    });
+  });
+}
+
+function bdDelTask(i, j) { bdReadDom(); bdPlan.chunks[i].tasks.splice(j, 1); bdRender(); }
+function bdDelChunk(i) { bdReadDom(); bdPlan.chunks.splice(i, 1); bdRender(); }
+function bdAddTask(i) { bdReadDom(); bdPlan.chunks[i].tasks.push({ content: "New task", estimate_min: 30, due: "" }); bdRender(); }
+
+async function redoChunk(i) {
+  bdReadDom();
+  const dest = document.getElementById("bdDest")?.value || "new";
+  $(`bdRedo_${i}`).innerHTML = '<span class="spin">&#8635;</span>';
+  try {
+    const chunk = bdPlan.chunks[i];
+    const raw = await claude(SYSTEM + ' Reply with ONLY valid JSON, no prose: {"name":"chunk name","tasks":[{"content":"task starting with a physical verb","estimate_min":30}]}. 2 to 5 tasks, in doing order.',
+      `Project: "${bdPlan.project}" (original ask: ${$("bdInput").value.trim()}). Re-break ONLY this chunk into better tasks: "${chunk.name}". Current tasks were: ${JSON.stringify(chunk.tasks.map(t => t.content))}. The other chunks are: ${JSON.stringify(bdPlan.chunks.filter((_, k) => k !== i).map(c => c.name))} — don't overlap with them.`, 900);
+    const nc = JSON.parse(raw.replace(/^[^{]*/, "").replace(/[^}]*$/, ""));
+    nc.tasks.forEach(t => { t.due = ""; });
+    bdPlan.chunks[i] = nc;
+    bdRender();
+    if (dest !== "new") document.getElementById("bdDest").value = dest;
+  } catch (e) { alertCoach("Chunk redo failed: " + e.message); $(`bdRedo_${i}`).innerHTML = "&#8635;"; }
+}
+
+function alertCoach(msg) { showCoach(msg); }
+
 async function createBreakdown() {
   if (!bdPlan) return;
+  bdReadDom();
+  const dest = document.getElementById("bdDest")?.value || "new";
   $("bdCreate").innerHTML = '<span class="spin">&#8635;</span>';
   try {
-    const proj = await td("/projects", { method: "POST", body: JSON.stringify({ name: bdPlan.project }) });
-    let first = true;
+    let projId;
+    if (dest === "new") {
+      const proj = await td("/projects", { method: "POST", body: JSON.stringify({ name: bdPlan.project }) });
+      projId = proj.id;
+    } else {
+      projId = dest;
+    }
     for (const chunk of bdPlan.chunks) {
-      const sec = await td("/sections", { method: "POST", body: JSON.stringify({ name: chunk.name, project_id: proj.id }) });
+      const sec = await td("/sections", { method: "POST", body: JSON.stringify({ name: chunk.name, project_id: projId }) });
       for (const t of chunk.tasks) {
-        const body = { content: t.content, project_id: proj.id, section_id: sec.id, description: "~" + t.estimate_min + "m" };
-        if (first) { body.due_string = "today"; body.priority = 3; first = false; }
+        const body = { content: t.content, project_id: projId, section_id: sec.id, description: "~" + (t.estimate_min || 30) + "m" };
+        if (t.due) { body.due_string = t.due; body.priority = 3; }
         await td("/tasks", { method: "POST", body: JSON.stringify(body) });
       }
     }
-    const p = $("bdPreview"); p.textContent = 'Created "' + bdPlan.project + '" in Todoist. The first task is on today’s list.';
+    const p = $("bdPreview"); p.innerHTML = "";
+    p.textContent = 'Created in Todoist' + (dest === "new" ? ' as "' + bdPlan.project + '"' : "") + ". Dated tasks are on the board.";
     bdPlan = null; $("bdCreate").classList.add("hidden"); $("bdInput").value = "";
     await loadTasks();
   } catch (e) { $("bdPreview").textContent = "Creation failed partway: " + e.message + " — check Todoist before retrying."; }
