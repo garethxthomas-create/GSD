@@ -95,6 +95,7 @@
 <div class="card">
   <strong>Capture</strong>
   <input id="captureInput" placeholder="Anything on your mind &rarr; Inbox" onkeydown="if(event.key==='Enter')capture()">
+  <p class="muted" style="margin-top:6px; font-size:12px">Speaks Todoist: "Change thermostat thursday p1 #Home @errand" &mdash; date, priority, #project, @label, all optional.</p>
 </div>
 
 <div class="card">
@@ -257,7 +258,15 @@ async function capture() {
   const v = $("captureInput").value.trim();
   if (!v) return;
   $("captureInput").value = "";
-  await td("/tasks", { method: "POST", body: JSON.stringify({ content: v }) });
+  try {
+    // Todoist quick-add: parses dates ("thursday", "aug 13", "every day"),
+    // priorities (p1/p2/p3), #Project and @label from the text itself.
+    await td("/tasks/quick", { method: "POST", body: JSON.stringify({ text: v }) });
+  } catch (e) {
+    // Never lose a capture: fall back to a literal task in the Inbox.
+    await td("/tasks", { method: "POST", body: JSON.stringify({ content: v }) });
+  }
+  await loadTasks();
 }
 
 // ---- Claude flows ----
