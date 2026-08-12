@@ -4,8 +4,8 @@ A standalone version of the GSD system. Todoist is the source of truth, Claude (
 
 Three parts, one repo:
 
-1. **The briefs** (`.github/workflows/briefs.yml` + `scripts/brief.mjs`). GitHub Actions runs three times a day: a morning brief at 8:00am (picks Today's Three, applies strikes to overdue tasks, sends the plan), a 2:30pm check-in, and a 5:00pm evening review (rolls unfinished priorities to tomorrow with a strike; three strikes sends a task to the Pit of Doom). Each brief arrives as a phone push (ntfy) and an email.
-2. **The dashboard** (`index.html`, served by GitHub Pages). Today's Three, a focus timer with a 90-minute daily target, Done buttons that close tasks in Todoist, a capture box that feeds the Inbox, and three Claude-powered flows: Plan my day, SHTF (rebuild the day when it detonates), and Avoiding (one ten-minute move to break resistance).
+1. **The briefs** (`.github/workflows/briefs.yml` + `scripts/brief.mjs`). GitHub Actions runs three times a day: a morning brief at 7:37am (picks Today's Three, applies strikes to overdue tasks, reports habit streaks), a 2:47pm check-in, and a 4:47pm evening review (rolls unfinished priorities to tomorrow with a strike; three strikes sends a task to the Pit of Doom). On Mondays the morning brief opens the week: one big outcome, plus anything undated that deserves a day. On Fridays the evening review becomes the weekly review: what got done, what's carrying strikes, what's in the Pit and whether anything deserves rescue. Each brief arrives as a phone push (Pushover) and an email.
+2. **The dashboard** (`index.html`, served by GitHub Pages). Today's Three, a focus timer with a 90-minute daily target and a 7-day focus history (stored in that browser), Done buttons that close tasks in Todoist, a capture box that feeds the Inbox, and four Claude-powered flows: Plan my day, SHTF (rebuild the day when it detonates), Avoiding (one ten-minute move to break resistance), and Breakdown (big vague project in, a full Todoist project of chunks and first actions out; only the first task gets a date, deliberately).
 3. **Todoist** holds all the data. Strikes are ordinary labels (`gsd-strike-1/2/3`), the Pit is a project, `@reference` marks bookmarks the system should ignore. Nothing is locked in; delete this repo and your tasks are untouched.
 
 ## Setup (about 20 minutes, no Claude access needed)
@@ -30,7 +30,8 @@ Repo → Settings → Secrets and variables → Actions → New repository secre
 |---|---|
 | `TODOIST_TOKEN` | your Todoist API token |
 | `ANTHROPIC_API_KEY` | your Anthropic key |
-| `NTFY_TOPIC` | a private, unguessable topic name you invent, e.g. `gsd-gareth-x7k2m9` |
+| `PUSHOVER_TOKEN` | the GSD application's API token from pushover.net (starts with `a`) |
+| `PUSHOVER_USER` | your Pushover user key (starts with `u`) |
 | `GMAIL_ADDRESS` | your Gmail address |
 | `GMAIL_APP_PASSWORD` | see below |
 
@@ -38,7 +39,7 @@ Gmail app password: Google Account → Security → 2-Step Verification (must be
 
 ### 4. Phone push
 
-Install the **ntfy** app (iOS/Android, free) → subscribe to the exact topic name you put in `NTFY_TOPIC`. Anyone who knows the topic name can see the messages, which is why it should be unguessable.
+Sign up at [pushover.net](https://pushover.net), install the Pushover app on your phone, and log in. Your user key is on the pushover.net main page; create an application named "GSD" there to get the API token. One-time $5 purchase in the app after the 30-day trial. If the trial ends without the purchase, pushes stop but email keeps working.
 
 ### 5. Turn on Pages and Actions
 
@@ -51,7 +52,7 @@ Actions tab → "GSD briefs" → Run workflow → mode: `morning` → Run. Withi
 
 ## Daily rhythm
 
-8:00am brief tells you Today's Three with first actions. Work; use the dashboard timer and Done buttons, or just tick things in Todoist. 2:30pm check-in shows what's done and asks what happens next. 5:00pm review closes the day; unfinished P1/P2 tasks roll to tomorrow and take a strike. Three strikes and a task goes to the Pit of Doom, where it stops nagging you until you deliberately rescue it. Capture anything, any time, into the Inbox; the morning brief sorts it.
+The 7:37am brief tells you Today's Three with first actions. Work; use the dashboard timer and Done buttons, or just tick things in Todoist. The 2:47pm check-in shows what's done and asks what happens next. The 4:47pm review closes the day; unfinished P1/P2 tasks roll to tomorrow and take a strike. Three strikes and a task goes to the Pit of Doom, where it stops nagging you until you deliberately rescue it. Capture anything, any time, into the Inbox; the morning brief sorts it.
 
 ## Adjusting things
 
@@ -62,4 +63,4 @@ Actions tab → "GSD briefs" → Run workflow → mode: `morning` → Run. Withi
 
 ## Costs
 
-GitHub: free (public repo, Pages, ~90 Actions minutes/month, within free tier). ntfy: free. Anthropic API: roughly 1-3 cents per brief with Sonnet, under a cent with Haiku. Todoist: your existing plan.
+GitHub: free (public repo, Pages, ~90 Actions minutes/month, within free tier). Pushover: $5 once. Anthropic API: roughly 1-3 cents per brief with Sonnet, under a cent with Haiku. Todoist: your existing plan.

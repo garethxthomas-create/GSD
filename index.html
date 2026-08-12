@@ -70,6 +70,8 @@
   <div id="timerDisplay">00:00</div>
   <div class="bar"><div id="focusBar"></div></div>
   <div class="muted" style="text-align:center; margin-top:4px"><span id="focusTotal">0</span> of 90 focused minutes today</div>
+  <div id="weekStrip" style="display:flex; gap:5px; justify-content:center; align-items:flex-end; height:34px; margin-top:10px"></div>
+  <div class="muted" style="text-align:center; font-size:11px" id="weekStripLabel"></div>
   <div class="btnrow" style="justify-content:center">
     <button class="primary" id="timerBtn" onclick="toggleTimer()">START</button>
     <button class="good" onclick="doneCurrent()">DONE</button>
@@ -95,11 +97,22 @@
 </div>
 
 <div class="card">
+  <strong>Breakdown</strong>
+  <p class="muted">Big vague project in, chunks and first actions out.</p>
+  <textarea id="bdInput" rows="2" placeholder="What's the project, and what does done look like?"></textarea>
+  <div class="btnrow">
+    <button class="primary" id="bdBtn" onclick="breakdown()">Break it down</button>
+    <button class="good hidden" id="bdCreate" onclick="createBreakdown()">Create in Todoist</button>
+  </div>
+  <div id="bdPreview" style="display:none; white-space:pre-wrap; font-size:14px; background:var(--card2); border-radius:10px; padding:12px; margin-top:10px"></div>
+</div>
+
+<div class="card">
   <div class="row"><strong>Also today</strong><span class="muted" id="restCount"></span></div>
   <div id="rest"></div>
 </div>
 
-<p class="muted" style="margin-top:14px; text-align:center">GSD &middot; Todoist is the source of truth &middot; the Pit is ignored</p>
+<p class="muted" style="margin-top:14px; text-align:center">GSD 2.0 &middot; Todoist is the source of truth &middot; the Pit is ignored</p>
 
 <script>
 const LS = "gsd_config";
@@ -287,11 +300,56 @@ async function avoiding() {
   } catch (e) { showCoach("Failed: " + e.message); }
 }
 
+// ---- Breakdown ----
+let bdPlan = null;
+async function breakdown() {
+  const v = $("bdInput").value.trim();
+  if (!v) return;
+  if (!cfg.anthropic) { toggleSettings(); return; }
+  $("bdBtn").innerHTML = '<span class="spin">&#8635;</span>';
+  try {
+    const raw = await claude(SYSTEM + ' Reply with ONLY valid JSON, no prose: {"project":"short name","chunks":[{"name":"chunk name","tasks":[{"content":"task starting with a physical verb","estimate_min":30}]}]}. 3 to 6 chunks, 2 to 5 tasks each, in doing order. The very first task must be startable in under 10 minutes.',
+      "Break down this project into chunks and tasks: " + v, 1500);
+    bdPlan = JSON.parse(raw.replace(/^[^{]*/, "").replace(/[^}]*$/, ""));
+    let txt = bdPlan.project + "\n";
+    bdPlan.chunks.forEach((c, i) => {
+      txt += `\n${i + 1}. ${c.name}\n`;
+      c.tasks.forEach(t => { txt += `   • ${t.content} (~${t.estimate_min}m)\n`; });
+    });
+    txt += "\nFirst task gets dated today. Nothing else gets a date yet; that's deliberate.";
+    const p = $("bdPreview"); p.style.display = "block"; p.textContent = txt;
+    $("bdCreate").classList.remove("hidden");
+  } catch (e) { const p = $("bdPreview"); p.style.display = "block"; p.textContent = "Breakdown failed: " + e.message; }
+  $("bdBtn").textContent = "Break it down";
+}
+
+async function createBreakdown() {
+  if (!bdPlan) return;
+  $("bdCreate").innerHTML = '<span class="spin">&#8635;</span>';
+  try {
+    const proj = await td("/projects", { method: "POST", body: JSON.stringify({ name: bdPlan.project }) });
+    let first = true;
+    for (const chunk of bdPlan.chunks) {
+      const sec = await td("/sections", { method: "POST", body: JSON.stringify({ name: chunk.name, project_id: proj.id }) });
+      for (const t of chunk.tasks) {
+        const body = { content: t.content, project_id: proj.id, section_id: sec.id, description: "~" + t.estimate_min + "m" };
+        if (first) { body.due_string = "today"; body.priority = 3; first = false; }
+        await td("/tasks", { method: "POST", body: JSON.stringify(body) });
+      }
+    }
+    const p = $("bdPreview"); p.textContent = 'Created "' + bdPlan.project + '" in Todoist. The first task is on today’s list.';
+    bdPlan = null; $("bdCreate").classList.add("hidden"); $("bdInput").value = "";
+    await loadTasks();
+  } catch (e) { $("bdPreview").textContent = "Creation failed partway: " + e.message + " — check Todoist before retrying."; }
+  $("bdCreate").textContent = "Create in Todoist";
+}
+
 // ---- Timer ----
 let timerOn = false, timerStart = 0, elapsed = 0, tick = null;
-let focusToday = Number(sessionStorage.getItem("gsd_focus_" + today()) || 0);
+let focusToday = Number(localStorage.getItem("gsd_focus_" + today()) || 0);
 $("focusTotal").textContent = Math.round(focusToday / 60);
 updateBar();
+renderWeekStrip();
 
 function toggleTimer() { timerOn ? stopTimer() : startTimer(); }
 function startTimer() {
@@ -305,10 +363,30 @@ function stopTimer() {
   clearInterval(tick);
   const s = Math.floor((Date.now() - timerStart) / 1000);
   elapsed += s; focusToday += s;
-  sessionStorage.setItem("gsd_focus_" + today(), focusToday);
+  localStorage.setItem("gsd_focus_" + today(), focusToday);
   $("timerBtn").textContent = "START"; $("timerBtn").classList.add("primary");
   $("focusTotal").textContent = Math.round(focusToday / 60);
   updateBar();
+  renderWeekStrip();
+}
+
+function renderWeekStrip() {
+  const days = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000);
+    const key = "gsd_focus_" + d.toLocaleDateString("en-CA");
+    const min = Math.round(Number(localStorage.getItem(key) || 0) / 60);
+    days.push({ label: d.toLocaleDateString("en-US", { weekday: "narrow" }), min, isToday: i === 0 });
+  }
+  const hit = days.filter(d => d.min >= 90).length;
+  $("weekStrip").innerHTML = days.map(d => {
+    const h = Math.max(3, Math.min(30, (d.min / 90) * 30));
+    const col = d.min >= 90 ? "var(--good)" : d.isToday ? "var(--accent)" : "var(--border)";
+    return `<div title="${d.min} min" style="display:flex;flex-direction:column;align-items:center;gap:2px">
+      <div style="width:16px;height:${h}px;background:${col};border-radius:3px"></div>
+      <span style="font-size:10px;color:var(--muted)">${d.label}</span></div>`;
+  }).join("");
+  $("weekStripLabel").textContent = hit ? `${hit} of the last 7 days hit 90 minutes` : "last 7 days";
 }
 function renderTimer() {
   const s = elapsed + Math.floor((Date.now() - timerStart) / 1000);
