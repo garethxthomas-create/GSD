@@ -114,6 +114,11 @@
   <div id="rest"></div>
 </div>
 
+<div class="card">
+  <div class="row"><strong>Coming up tomorrow</strong><span class="muted" id="tmrwCount"></span></div>
+  <div id="tmrw"></div>
+</div>
+
 <p class="muted" style="margin-top:14px; text-align:center">GSD 2.0 &middot; Todoist is the source of truth &middot; the Pit is ignored</p>
 
 <script>
@@ -179,6 +184,7 @@ async function claude(system, user, maxTokens = 900) {
 const SYSTEM = 'You are GSD, a direct, warm, zero-shame productivity coach. No corporate language, no em dashes, US spelling. Every task gets one concrete first physical action and an estimate in minutes. Answer in plain short text that fits on a phone.';
 
 const today = () => new Date().toLocaleDateString("en-CA");
+const tomorrowStr = () => new Date(Date.now() + 86400000).toLocaleDateString("en-CA");
 const strikes = t => { for (let i = 3; i >= 1; i--) if (t.labels.includes("gsd-strike-" + i)) return i; return 0; };
 const ignored = t => t.project_id === pitId || t.labels.includes("reference");
 
@@ -231,8 +237,12 @@ function render() {
   const t0 = today();
   $("three").innerHTML = three.length ? three.map((t, i) => taskRow(t, i)).join("") : '<p class="muted">Nothing due. Capture something or enjoy it.</p>';
   const rest = allTasks.filter(t => t.due && t.due.date <= t0 && !three.includes(t));
-  $("rest").innerHTML = rest.map(t => taskRow(t)).join("") || '<p class="muted">Nothing else today.</p>';
+  $("rest").innerHTML = rest.map(t => taskRow(t)).join("") || '<p class="muted">Empty in a good way: everything due today is already in the Three.</p>';
   $("restCount").textContent = rest.length ? rest.length + " tasks" : "";
+  const t1 = tomorrowStr();
+  const tmrw = allTasks.filter(t => t.due && t.due.date === t1);
+  $("tmrw").innerHTML = tmrw.map(t => taskRow(t)).join("") || '<p class="muted">Nothing dated tomorrow yet.</p>';
+  $("tmrwCount").textContent = tmrw.length ? tmrw.length + " tasks" : "";
   $("focusTaskLabel").textContent = currentTask ? currentTask.content : "no task selected";
 }
 
