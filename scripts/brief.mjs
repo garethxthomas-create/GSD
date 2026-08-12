@@ -216,12 +216,27 @@ async function evening(state) {
 
 // ---------- Delivery ----------
 async function notify({ title, body }) {
+  const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN || "";
+  const PUSHOVER_USER = process.env.PUSHOVER_USER || "";
+  if (PUSHOVER_TOKEN && PUSHOVER_USER) {
+    const res = await fetch("https://api.pushover.net/1/messages.json", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token: PUSHOVER_TOKEN,
+        user: PUSHOVER_USER,
+        title,
+        message: body.slice(0, 1024), // Pushover message limit
+      }),
+    });
+    if (!res.ok) throw new Error(`Pushover: ${res.status} ${await res.text()}`);
+  }
   if (NTFY_TOPIC) {
     await fetch(`https://ntfy.sh/${NTFY_TOPIC}`, {
       method: "POST",
       headers: { Title: title, Priority: "default", Tags: "brain" },
       body,
-    });
+    }).catch(() => {}); // ntfy is best-effort once Pushover is primary
   }
   const fs = await import("node:fs");
   fs.writeFileSync("brief_out.md", `# ${title}\n\n${body}\n`);
