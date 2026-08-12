@@ -31,7 +31,8 @@ jobs:
         env:
           TODOIST_TOKEN: ${{ secrets.TODOIST_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
           MODE: ${{ github.event.inputs.mode }}
         run: node scripts/brief.mjs
 
