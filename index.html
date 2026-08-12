@@ -24,6 +24,7 @@
   input, textarea { width: 100%; background: var(--card2); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 15px; margin-top: 6px; }
   .task { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-top: 1px solid var(--border); }
   .task:first-of-type { border-top: none; }
+  .task.focused { background: rgba(79,140,255,.10); border-radius: 10px; padding: 12px 10px; border-top: none; }
   .tnum { font-size: 22px; font-weight: 800; color: var(--accent); min-width: 26px; }
   .tname { font-weight: 600; }
   .tmeta { font-size: 13px; color: var(--muted); margin-top: 2px; }
@@ -207,7 +208,7 @@ function taskRow(t, i) {
   const s = strikes(t);
   const p = 5 - t.priority;
   const act = plan?.find(x => x.id === t.id);
-  return `<div class="task">
+  return `<div class="task${currentTask && currentTask.id === t.id ? " focused" : ""}">
     <div class="tnum">${i != null ? i + 1 : "&middot;"}</div>
     <div style="flex:1">
       <div class="tname">${esc(t.content)}</div>
@@ -245,7 +246,9 @@ async function completeTask(id) {
 function focusOn(id) {
   currentTask = allTasks.find(t => t.id === id) || null;
   $("focusTaskLabel").textContent = currentTask ? currentTask.content : "no task selected";
+  render();
   window.scrollTo({ top: 0, behavior: "smooth" });
+  if (currentTask && !timerOn) startTimer();
 }
 
 async function doneCurrent() { if (currentTask) await completeTask(currentTask.id); }
