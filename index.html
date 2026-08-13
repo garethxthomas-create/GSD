@@ -229,6 +229,7 @@ function taskRow(t, i) {
     <div style="display:flex; flex-direction:column; gap:6px">
       <button class="good" onclick="completeTask('${t.id}')">Done</button>
       <button onclick="focusOn('${t.id}')">Focus</button>
+      <button onclick="notNow('${t.id}')" style="font-size:12px">Later</button>
     </div>
   </div>`;
 }
@@ -310,6 +311,30 @@ async function shtf() {
     const out = await claude(SYSTEM, `The day detonated: "${what}". Remaining today: ${JSON.stringify(briefTasks(allTasks.filter(t => t.due && t.due.date <= today())))}. Rebuild the rest of the day: what to drop, what to keep, one next action. The plan changed, they didn't fail it. Max 90 words.`);
     showCoach(out);
   } catch (e) { showCoach("Failed: " + e.message); }
+}
+
+async function notNow(id) {
+  const t = allTasks.find(x => x.id === id);
+  if (!t) return;
+  const reason = prompt('Not now — why? e.g. "waiting on an email, try tomorrow" or "no resources yet, drop to p2 and revisit Friday"');
+  if (!reason) return;
+  if (!cfg.anthropic) { toggleSettings(); return; }
+  showCoach("Parking it…");
+  try {
+    const raw = await claude(SYSTEM + ' Reply with ONLY valid JSON, no prose: {"due_string":"tomorrow OR friday OR 2026-08-20 OR null","priority":"p1 OR p2 OR p3 OR p4 OR null","waiting_on":"short phrase OR null","summary":"one warm sentence to Gareth about what you did and when this resurfaces"}. null means leave that field unchanged. Pick the date the reason implies (default tomorrow if blocked short-term). Set waiting_on when the blocker is external (an email, a person, a delivery) so future briefs know why this is parked.',
+      `Task: "${t.content}" (currently p${5 - t.priority}, due ${t.due?.date || "undated"}). Gareth is demoting it and says: "${reason}". Today is ${today()}.`, 500);
+    const j = JSON.parse(raw.replace(/^[^{]*/, "").replace(/[^}]*$/, ""));
+    const body = {};
+    if (j.due_string && j.due_string !== "null") body.due_string = j.due_string;
+    if (j.priority && j.priority !== "null") body.priority = { p1: 4, p2: 3, p3: 2, p4: 1 }[j.priority];
+    if (j.waiting_on && j.waiting_on !== "null") {
+      const rest = (t.description || "").replace(/^⏸ [^\n]*\n?/, "");
+      body.description = `⏸ ${j.waiting_on} (noted ${today()})` + (rest ? "\n" + rest : "");
+    }
+    if (Object.keys(body).length) await td(`/tasks/${t.id}`, { method: "POST", body: JSON.stringify(body) });
+    showCoach(j.summary || "Parked.");
+    await loadTasks();
+  } catch (e) { showCoach("Couldn't park it: " + e.message); }
 }
 
 async function avoiding() {
