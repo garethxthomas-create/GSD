@@ -66,6 +66,12 @@
   <div class="btnrow"><button class="primary" onclick="saveConfig()">Save</button></div>
 </div>
 
+<div class="card" id="weekCard" style="border-left:3px solid var(--accent)">
+  <div class="muted" style="font-size:11px; letter-spacing:1px; text-transform:uppercase">This week</div>
+  <div id="weekOutcome" style="font-weight:600; margin-top:3px">&hellip;</div>
+  <div class="muted" id="weekNext" style="font-size:12px; margin-top:6px"></div>
+</div>
+
 <div class="card" id="focusCard">
   <div class="row"><strong>Focus</strong><span class="muted" id="focusTaskLabel">no task selected</span></div>
   <div id="timerDisplay">00:00</div>
@@ -119,12 +125,12 @@
   <div id="tmrw"></div>
 </div>
 
-<p class="muted" style="margin-top:14px; text-align:center">GSD 2.0 &middot; Todoist is the source of truth &middot; the Pit is ignored</p>
+<p class="muted" style="margin-top:14px; text-align:center">GSD 2.1 &middot; Todoist is the source of truth &middot; the Three is never padded</p>
 
 <script>
 const LS = "gsd_config";
 let cfg = JSON.parse(localStorage.getItem(LS) || "{}");
-let allTasks = [], projects = {}, pitId = null;
+let allTasks = [], projects = {}, sections = {}, outcomes = [], pitId = null;
 let three = [], currentTask = null, plan = null;
 
 const $ = id => document.getElementById(id);
@@ -186,29 +192,45 @@ const SYSTEM = 'You are GSD, a direct, warm, zero-shame productivity coach. No c
 const today = () => new Date().toLocaleDateString("en-CA");
 const tomorrowStr = () => new Date(Date.now() + 86400000).toLocaleDateString("en-CA");
 const strikes = t => { for (let i = 3; i >= 1; i--) if (t.labels.includes("gsd-strike-" + i)) return i; return 0; };
-const ignored = t => t.project_id === pitId || t.labels.includes("reference");
+const ignored = t => t.project_id === pitId || t.labels.includes("reference") || t.labels.includes("outcome");
+const cleanOutcome = s => s.replace(/^[\s*▸•\-]+/, "").trim();
 
 async function loadTasks() {
   if (!cfg.todoist) { toggleSettings(); return; }
   try {
-    const [projs, tasks] = await Promise.all([tdList("/projects"), tdList("/tasks")]);
+    const [projs, tasks, sects] = await Promise.all([tdList("/projects"), tdList("/tasks"), tdList("/sections").catch(() => [])]);
     projects = Object.fromEntries(projs.map(p => [p.id, p.name]));
+    sections = Object.fromEntries(sects.map(s => [s.id, s.name]));
     pitId = (projs.find(p => p.name.includes("Pit of Doom")) || {}).id;
+    outcomes = tasks.filter(t => t.labels.includes("outcome") && t.due && t.due.date)
+      .sort((a, b) => (a.due.date < b.due.date ? -1 : 1));
     allTasks = tasks.filter(t => !ignored(t));
     pickThree();
     render();
+    renderWeek();
   } catch (e) {
     $("three").innerHTML = '<p class="muted">Could not reach Todoist. Check your token in settings.</p>';
   }
 }
 
 function pickThree() {
+  // Only tasks actually due today or overdue. Never padded with future or undated work.
   const t0 = today();
   const cand = allTasks
-    .filter(t => (t.due && t.due.date <= t0) || t.priority === 4 || strikes(t) > 0)
-    .sort((a, b) => (b.priority - a.priority) || (strikes(b) - strikes(a)) || ((a.due?.date || "9") < (b.due?.date || "9") ? -1 : 1));
+    .filter(t => t.due && t.due.date <= t0)
+    .sort((a, b) => (b.priority - a.priority) || (strikes(b) - strikes(a)) || (a.due.date < b.due.date ? -1 : 1));
   three = cand.slice(0, 3);
   if (!currentTask && three[0]) currentTask = three[0];
+}
+
+function renderWeek() {
+  const t0 = today();
+  const past = outcomes.filter(o => o.due.date <= t0);
+  const cur = past.length ? past.filter(o => o.due.date === past[past.length - 1].due.date) : [];
+  const fut = outcomes.filter(o => o.due.date > t0);
+  const nxt = fut.length ? fut.filter(o => o.due.date === fut[0].due.date) : [];
+  $("weekOutcome").textContent = cur.length ? cur.map(o => cleanOutcome(o.content)).join(" · ") : "No outcome set for this week";
+  $("weekNext").textContent = nxt.length ? "Next: " + nxt.map(o => cleanOutcome(o.content)).join(" · ") : "";
 }
 
 function taskRow(t, i) {
@@ -222,7 +244,7 @@ function taskRow(t, i) {
       <div class="tmeta">
         ${p === 1 ? '<span class="pill p1">P1</span>' : `<span class="pill">P${p}</span>`}
         ${s ? `<span class="pill strike">${s} strike${s > 1 ? "s" : ""}</span>` : ""}
-        <span class="pill">${esc(projects[t.project_id] || "")}</span>
+        <span class="pill">${esc(projects[t.project_id] || "")}${t.section_id && sections[t.section_id] ? " / " + esc(sections[t.section_id]) : ""}</span>
       </div>
       ${act ? `<div class="taction">&rarr; ${esc(act.first_action)} (~${act.estimate_min} min)</div>` : ""}
     </div>
@@ -236,7 +258,10 @@ function taskRow(t, i) {
 
 function render() {
   const t0 = today();
-  $("three").innerHTML = three.length ? three.map((t, i) => taskRow(t, i)).join("") : '<p class="muted">Nothing due. Capture something or enjoy it.</p>';
+  $("three").innerHTML = three.length
+    ? three.map((t, i) => taskRow(t, i)).join("")
+      + (three.length < 3 ? `<p class="muted" style="margin-top:10px">${three.length === 1 ? "One thing" : "Two things"} due today. That is the honest list, not a gap to fill.</p>` : "")
+    : '<p class="muted">Nothing due today. Capture something, or enjoy it.</p>';
   const rest = allTasks.filter(t => t.due && t.due.date <= t0 && !three.includes(t));
   $("rest").innerHTML = rest.map(t => taskRow(t)).join("") || '<p class="muted">Empty in a good way: everything due today is already in the Three.</p>';
   $("restCount").textContent = rest.length ? rest.length + " tasks" : "";
@@ -284,15 +309,16 @@ async function capture() {
 function showCoach(text) { const c = $("coach"); c.style.display = "block"; c.textContent = text; }
 
 function briefTasks(list) {
-  return list.map(t => ({ id: t.id, task: t.content, project: projects[t.project_id], priority: "p" + (5 - t.priority), due: t.due?.date || null, strikes: strikes(t) }));
+  return list.map(t => ({ id: t.id, task: t.content, project: projects[t.project_id], section: t.section_id ? sections[t.section_id] : null, priority: "p" + (5 - t.priority), due: t.due?.date || null, strikes: strikes(t), note: (t.description || "").split("\n")[0].slice(0, 140) || null }));
 }
 
 async function planDay() {
   if (!cfg.anthropic) { toggleSettings(); return; }
   $("planBtn").innerHTML = '<span class="spin">&#8635;</span>';
   try {
-    const raw = await claude(SYSTEM + ' Reply with ONLY valid JSON: {"three":[{"id":"...","first_action":"...","estimate_min":30}],"note":"one sentence"}',
-      "Pick Today's Three and first actions from: " + JSON.stringify(briefTasks(allTasks.filter(t => (t.due && t.due.date <= today()) || t.priority === 4 || !t.due))));
+    const dueNow = allTasks.filter(t => t.due && t.due.date <= today());
+    const raw = await claude(SYSTEM + ' Reply with ONLY valid JSON: {"three":[{"id":"...","first_action":"...","estimate_min":30}],"note":"one sentence"}. You may ONLY use ids from the list given. If fewer than three tasks are given, return fewer. Never invent a task and never pad the list.',
+      "Pick up to three for today, with first actions, from these tasks that are actually due: " + JSON.stringify(briefTasks(dueNow)));
     const j = JSON.parse(raw.replace(/^[^{]*/, "").replace(/[^}]*$/, ""));
     plan = j.three;
     three = j.three.map(x => allTasks.find(t => t.id === x.id)).filter(Boolean);
