@@ -63,6 +63,8 @@
   <input id="cfgAnthropic" type="password" placeholder="sk-ant-...">
   <label class="muted">Claude model</label>
   <input id="cfgModel" placeholder="claude-sonnet-4-5">
+  <label class="muted">Private context (stays in this browser, never in the repo)</label>
+  <textarea id="cfgPrivate" rows="3" placeholder="Anything you want GSD to know but not publish: figures, names, sensitive detail."></textarea>
   <div class="btnrow"><button class="primary" onclick="saveConfig()">Save</button></div>
 </div>
 
@@ -98,6 +100,17 @@
   </div>
 </div>
 
+<div class="card" id="askCard">
+  <div class="row">
+    <strong>Ask GSD</strong>
+    <button class="danger" style="font-size:11px; padding:4px 9px" onclick="clearAsk()">Clear</button>
+  </div>
+  <p class="muted" style="font-size:12px; margin-top:2px">What does this mean, why am I doing it, what does good look like. It knows the plan.</p>
+  <div id="askLog" style="display:none; margin-top:10px; font-size:14px; max-height:60vh; overflow-y:auto"></div>
+  <input id="askInput" placeholder="Ask about a task, the week, or the plan" onkeydown="if(event.key==='Enter')ask()">
+  <div class="btnrow"><button class="primary" id="askBtn" onclick="ask()">Ask</button></div>
+</div>
+
 <div class="card">
   <strong>Capture</strong>
   <input id="captureInput" placeholder="Anything on your mind &rarr; Inbox" onkeydown="if(event.key==='Enter')capture()">
@@ -130,7 +143,8 @@
 <script>
 const LS = "gsd_config";
 let cfg = JSON.parse(localStorage.getItem(LS) || "{}");
-let allTasks = [], projects = {}, sections = {}, outcomes = [], pitId = null;
+let allTasks = [], refTasks = [], projects = {}, sections = {}, outcomes = [], pitId = null;
+let ctxDoc = "", askHistory = [];
 let three = [], currentTask = null, plan = null;
 
 const $ = id => document.getElementById(id);
@@ -142,9 +156,15 @@ function toggleSettings() {
   $("cfgTodoist").value = cfg.todoist || "";
   $("cfgAnthropic").value = cfg.anthropic || "";
   $("cfgModel").value = cfg.model || "claude-sonnet-4-5";
+  $("cfgPrivate").value = cfg.private || "";
 }
 function saveConfig() {
-  cfg = { todoist: $("cfgTodoist").value.trim(), anthropic: $("cfgAnthropic").value.trim(), model: $("cfgModel").value.trim() || "claude-sonnet-4-5" };
+  cfg = {
+    todoist: $("cfgTodoist").value.trim(),
+    anthropic: $("cfgAnthropic").value.trim(),
+    model: $("cfgModel").value.trim() || "claude-sonnet-4-5",
+    private: $("cfgPrivate").value.trim(),
+  };
   localStorage.setItem(LS, JSON.stringify(cfg));
   $("settings").classList.add("hidden");
   loadTasks();
@@ -200,10 +220,11 @@ async function loadTasks() {
   try {
     const [projs, tasks, sects] = await Promise.all([tdList("/projects"), tdList("/tasks"), tdList("/sections").catch(() => [])]);
     projects = Object.fromEntries(projs.map(p => [p.id, p.name]));
-    sections = Object.fromEntries(sects.map(s => [s.id, s.name]));
+    sections = Object.fromEntries(sects.map(s => [s.id, { name: s.name, description: s.description || "" }]));
     pitId = (projs.find(p => p.name.includes("Pit of Doom")) || {}).id;
     outcomes = tasks.filter(t => t.labels.includes("outcome") && t.due && t.due.date)
       .sort((a, b) => (a.due.date < b.due.date ? -1 : 1));
+    refTasks = tasks.filter(t => t.labels.includes("reference"));
     allTasks = tasks.filter(t => !ignored(t));
     pickThree();
     render();
@@ -244,14 +265,17 @@ function taskRow(t, i) {
       <div class="tmeta">
         ${p === 1 ? '<span class="pill p1">P1</span>' : `<span class="pill">P${p}</span>`}
         ${s ? `<span class="pill strike">${s} strike${s > 1 ? "s" : ""}</span>` : ""}
-        <span class="pill">${esc(projects[t.project_id] || "")}${t.section_id && sections[t.section_id] ? " / " + esc(sections[t.section_id]) : ""}</span>
+        <span class="pill">${esc(projects[t.project_id] || "")}${t.section_id && sections[t.section_id] ? " / " + esc(sections[t.section_id].name) : ""}</span>
       </div>
       ${act ? `<div class="taction">&rarr; ${esc(act.first_action)} (~${act.estimate_min} min)</div>` : ""}
     </div>
     <div style="display:flex; flex-direction:column; gap:6px">
       <button class="good" onclick="completeTask('${t.id}')">Done</button>
       <button onclick="focusOn('${t.id}')">Focus</button>
-      <button onclick="notNow('${t.id}')" style="font-size:12px">Later</button>
+      <div style="display:flex; gap:6px">
+        <button onclick="notNow('${t.id}')" style="font-size:12px; flex:1">Later</button>
+        <button onclick="explainTask('${t.id}')" style="font-size:12px" title="What is this, and why">?</button>
+      </div>
     </div>
   </div>`;
 }
@@ -309,7 +333,7 @@ async function capture() {
 function showCoach(text) { const c = $("coach"); c.style.display = "block"; c.textContent = text; }
 
 function briefTasks(list) {
-  return list.map(t => ({ id: t.id, task: t.content, project: projects[t.project_id], section: t.section_id ? sections[t.section_id] : null, priority: "p" + (5 - t.priority), due: t.due?.date || null, strikes: strikes(t), note: (t.description || "").split("\n")[0].slice(0, 140) || null }));
+  return list.map(t => ({ id: t.id, task: t.content, project: projects[t.project_id], section: t.section_id ? sections[t.section_id]?.name : null, priority: "p" + (5 - t.priority), due: t.due?.date || null, strikes: strikes(t), note: (t.description || "").split("\n")[0].slice(0, 140) || null }));
 }
 
 async function planDay() {
@@ -371,6 +395,123 @@ async function avoiding() {
     const out = await claude(SYSTEM, `Gareth is avoiding "${t.content}" (strikes: ${strikes(t)}) and drifting toward distraction. Externalize what the resistance is probably saying in one line, then give exactly one physical move of ten minutes or less to start. Max 60 words.`);
     showCoach(out);
   } catch (e) { showCoach("Failed: " + e.message); }
+}
+
+// ---- Context and Ask ----
+async function claudeConvo(system, messages, maxTokens = 1000) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": cfg.anthropic,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: cfg.model || "claude-sonnet-4-5", max_tokens: maxTokens, system, messages }),
+  });
+  if (!res.ok) throw new Error("Anthropic " + res.status);
+  const d = await res.json();
+  return d.content.map(c => c.text || "").join("");
+}
+
+async function loadContext() {
+  try {
+    const res = await fetch("context.md?v=" + Date.now(), { cache: "no-store" });
+    if (res.ok) {
+      const t = await res.text();
+      if (t && !t.trimStart().startsWith("<")) ctxDoc = t; // guard against a 404 HTML page
+    }
+  } catch (e) { /* context.md is optional */ }
+}
+
+function groundingSystem() {
+  let s = SYSTEM + " You are answering a direct question, not writing a brief. Lead with the answer, be specific to Gareth's actual plan rather than generic, and stay under about 150 words unless the question genuinely needs more. If you do not know something, say so plainly and say where the answer would come from. Never invent detail about Sallie Mae, BSI or the plan.";
+  if (ctxDoc) s += "\n\n--- BACKGROUND: the plan behind the plan ---\n" + ctxDoc.slice(0, 9000);
+  if (cfg.private) s += "\n\n--- PRIVATE CONTEXT (do not repeat verbatim unless asked) ---\n" + cfg.private.slice(0, 3000);
+  return s;
+}
+
+function planSnapshot(detailChars = 200) {
+  return {
+    today: today(),
+    week_outcomes: outcomes.map(o => `${o.due.date}: ${cleanOutcome(o.content)}`),
+    section_purposes: Object.values(sections).filter(s => s.description).map(s => `${s.name}: ${s.description}`),
+    open_tasks: allTasks.map(t => ({
+      task: t.content,
+      project: projects[t.project_id],
+      section: t.section_id ? sections[t.section_id]?.name : null,
+      due: t.due?.date || null,
+      priority: "p" + (5 - t.priority),
+      strikes: strikes(t) || undefined,
+      detail: (t.description || "").slice(0, detailChars) || undefined,
+    })),
+    source_shelf: refTasks.map(t => t.content),
+  };
+}
+
+function mdLite(s) {
+  return esc(s)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/^#{1,4} (.+)$/gm, "<strong>$1</strong>")
+    .replace(/\n/g, "<br>");
+}
+
+function renderAsk() {
+  const log = $("askLog");
+  if (!askHistory.length) { log.style.display = "none"; log.innerHTML = ""; return; }
+  log.style.display = "block";
+  log.innerHTML = askHistory.map(m => m.role === "user"
+    ? `<p class="muted" style="margin-top:12px"><strong>You:</strong> ${esc(m.content)}</p>`
+    : `<div style="background:var(--card2); border-radius:10px; padding:11px; margin-top:6px">${mdLite(m.content)}</div>`
+  ).join("");
+  log.scrollTop = log.scrollHeight;
+}
+
+function clearAsk() { askHistory = []; renderAsk(); }
+
+async function askClaude(question, extra) {
+  if (!cfg.anthropic) { toggleSettings(); return; }
+  askHistory.push({ role: "user", content: question });
+  renderAsk();
+  $("askBtn").innerHTML = '<span class="spin">&#8635;</span>';
+  try {
+    const convo = askHistory.slice(-6).map(m => ({ role: m.role, content: m.content }));
+    while (convo.length && convo[0].role !== "user") convo.shift();
+    convo[convo.length - 1] = {
+      role: "user",
+      content: `${extra ? extra + "\n\n" : ""}CURRENT PLAN STATE:\n${JSON.stringify(planSnapshot())}\n\nQUESTION: ${question}`,
+    };
+    askHistory.push({ role: "assistant", content: await claudeConvo(groundingSystem(), convo, 1000) });
+  } catch (e) {
+    askHistory.push({ role: "assistant", content: "Could not answer: " + e.message });
+  }
+  renderAsk();
+  $("askBtn").textContent = "Ask";
+  $("askCard").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function ask() {
+  const q = $("askInput").value.trim();
+  if (!q) return;
+  $("askInput").value = "";
+  askClaude(q);
+}
+
+async function explainTask(id) {
+  const t = allTasks.find(x => x.id === id);
+  if (!t) return;
+  const sect = t.section_id ? sections[t.section_id] : null;
+  const extra = "THE TASK IN FULL:\n" + JSON.stringify({
+    task: t.content,
+    project: projects[t.project_id],
+    section: sect?.name || null,
+    section_purpose: sect?.description || null,
+    due: t.due?.date || null,
+    priority: "p" + (5 - t.priority),
+    strikes: strikes(t),
+    full_description: t.description || null,
+  });
+  askClaude(`Explain "${t.content}". What does it actually mean, what is it in service of, what does done look like, and what is the first move?`, extra);
 }
 
 // ---- Breakdown ----
@@ -539,6 +680,7 @@ function updateBar(extra = 0) {
   $("focusBar").style.width = Math.min(100, ((focusToday + extra) / 5400) * 100) + "%";
 }
 
+loadContext();
 loadTasks();
 </script>
 </body>
