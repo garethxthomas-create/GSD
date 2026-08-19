@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// GSD 2.0 brief generator — runs in GitHub Actions on a schedule (or manually).
+// GSD 2.1 brief generator — runs in GitHub Actions on a schedule (or manually).
 // Modes: morning (plan the day; Mondays open the week), midday (check-in),
 // evening (review + strikes; Fridays become the weekly review), weekly (forced).
 // Uses the Todoist unified API (/api/v1) and the Anthropic API. No npm dependencies.
+//
+// 2.1 changes: the Three is never padded with tasks that are not due, and every
+// brief leads with the week's stated outcome and where the work sits in the plan.
 
 const TODOIST_TOKEN = need("TODOIST_TOKEN");
 const ANTHROPIC_API_KEY = need("ANTHROPIC_API_KEY");
@@ -13,7 +16,8 @@ const MODE = resolveMode(process.env.MODE);
 
 const PIT_NAME = "Pit of Doom";
 const STRIKE_LABELS = ["gsd-strike-1", "gsd-strike-2", "gsd-strike-3"];
-const IGNORE_LABEL = "reference";
+const IGNORE_LABEL = "reference";   // source material, never nagged about
+const OUTCOME_LABEL = "outcome";    // week markers: context, never a task
 
 function need(k) {
   const v = process.env[k];
@@ -71,19 +75,21 @@ async function todoistList(path) {
 }
 
 async function getState() {
-  const [projects, tasks, labels] = await Promise.all([
+  const [projects, tasks, labels, sections] = await Promise.all([
     todoistList("/projects"),
     todoistList("/tasks"),
     todoistList("/labels"),
+    todoistList("/sections").catch(() => []),
   ]);
   const pit = projects.find(p => p.name.includes(PIT_NAME)) || null;
   const projById = Object.fromEntries(projects.map(p => [p.id, p]));
-  return { projects, tasks, labels, pit, projById };
+  const sectById = Object.fromEntries(sections.map(s => [s.id, s]));
+  return { projects, tasks, labels, sections, pit, projById, sectById };
 }
 
-async function ensureStrikeLabels(existing) {
+async function ensureLabels(existing) {
   const have = new Set(existing.map(l => l.name));
-  for (const name of STRIKE_LABELS) {
+  for (const name of [...STRIKE_LABELS, IGNORE_LABEL, OUTCOME_LABEL]) {
     if (!have.has(name)) await todoist("/labels", { method: "POST", body: JSON.stringify({ name }) });
   }
 }
@@ -93,8 +99,11 @@ function strikeCount(task) {
   return 0;
 }
 
+// Tasks the system must never pick, strike, or reschedule.
 function isIgnored(task, pit) {
-  return (pit && task.project_id === pit.id) || task.labels.includes(IGNORE_LABEL);
+  return (pit && task.project_id === pit.id)
+    || task.labels.includes(IGNORE_LABEL)
+    || task.labels.includes(OUTCOME_LABEL);
 }
 
 async function addStrike(task, pit) {
@@ -135,10 +144,52 @@ function computeStreaks(completedItems, recurringTasks) {
   return recurringTasks.map(t => {
     const days = daysByContent[t.content] || new Set();
     let streak = 0;
-    let i = days.has(localDate(0)) ? 0 : -1; // streak may still be alive if today isn't done yet
+    let i = days.has(localDate(0)) ? 0 : -1; // streak may still be alive if today is not done yet
     for (; days.has(localDate(i)); i--) streak++;
     return { habit: t.content, streak, doneToday: days.has(localDate(0)) };
   });
+}
+
+// ---------- The bigger picture ----------
+const cleanOutcome = s => s.replace(/^[\s*▸•\-]+/, "").trim();
+
+function planShape(state) {
+  const today = localDate(0);
+  const { tasks, projById, sectById, pit } = state;
+
+  const outcomes = tasks
+    .filter(t => t.labels.includes(OUTCOME_LABEL) && t.due?.date)
+    .sort((a, b) => (a.due.date < b.due.date ? -1 : 1));
+
+  const past = outcomes.filter(o => o.due.date <= today);
+  const currentDate = past.length ? past[past.length - 1].due.date : null;
+  const thisWeek = currentDate
+    ? outcomes.filter(o => o.due.date === currentDate).map(o => cleanOutcome(o.content))
+    : [];
+  const future = outcomes.filter(o => o.due.date > today);
+  const nextDate = future.length ? future[0].due.date : null;
+  const nextWeek = nextDate
+    ? { date: nextDate, outcomes: future.filter(o => o.due.date === nextDate).map(o => cleanOutcome(o.content)) }
+    : null;
+
+  // Open work per section, so the brief can say where things stand.
+  const buckets = {};
+  for (const t of tasks) {
+    if (isIgnored(t, pit) || t.parent_id) continue;
+    const proj = projById[t.project_id]?.name || "?";
+    const sect = t.section_id ? (sectById[t.section_id]?.name || "") : "";
+    const key = sect ? `${proj} / ${sect}` : proj;
+    const b = (buckets[key] ||= { open: 0, dueThisWeek: 0 });
+    b.open++;
+    if (t.due?.date && t.due.date <= localDate(7)) b.dueThisWeek++;
+  }
+  const shape = Object.entries(buckets)
+    .filter(([, b]) => b.open > 0)
+    .sort((a, b) => b[1].dueThisWeek - a[1].dueThisWeek || b[1].open - a[1].open)
+    .slice(0, 8)
+    .map(([k, b]) => `${k}: ${b.open} open, ${b.dueThisWeek} due within 7 days`);
+
+  return { thisWeek, nextWeek, shape };
 }
 
 // ---------- Claude ----------
@@ -162,21 +213,44 @@ async function claude(system, user, maxTokens = 1200) {
   return data.content.map(c => c.text || "").join("");
 }
 
-const GSD_SYSTEM = `You are GSD, Gareth's Getting Stuff Done coach. Voice: direct, warm, zero shame, zero corporate language, no em dashes, US spelling. Plans change; people don't fail them. Never moralize about incomplete tasks. Every recommended task must come with one concrete FIRST PHYSICAL ACTION (open X, write one sentence of Y, put Z in a bag) and a time estimate in minutes. Prefer finishing over starting. P1 beats P2. Due today beats due later. A task with strikes (gsd-strike labels) is being avoided: name that gently and make its first action smaller. Ignore tasks labeled "reference" and anything in the Pit of Doom unless explicitly asked about the Pit. A task whose note starts with "⏸" was deliberately parked by Gareth with a stated reason (waiting on something external, or resources not ready). Respect the reason: never shame a parked task, don't pick it for Today's Three while its blocker plausibly still holds, and when its date arrives, ask in one line whether the blocker has cleared instead of assuming. Output plain markdown, no headers deeper than bold text, short lines that read well in a phone notification.`;
+const GSD_SYSTEM = `You are GSD, Gareth's Getting Stuff Done coach. Voice: direct, warm, zero shame, zero corporate language, no em dashes, US spelling. Plans change; people don't fail them. Never moralize about incomplete tasks. Every recommended task must come with one concrete FIRST PHYSICAL ACTION (open X, write one sentence of Y, put Z in a bag) and a time estimate in minutes.
 
-function taskSummary(tasks, projById, pit) {
+HARD RULE ON SELECTION: you may only recommend tasks from the list you are given as due. If there are fewer than three, recommend fewer and say plainly that the day is light. Never pad the list with something that is not due, and never invent a task. A short honest list beats three items where one is fiction. If the day is light you may mention at most one undated item from the offers list, clearly framed as optional.
+
+Within what is due: finishing beats starting, P1 beats P2, and a task with strikes is being avoided, so name that gently and make its first action smaller.
+
+A task whose note starts with "⏸" was deliberately parked by Gareth with a stated reason. Respect it: no shame, and when its date arrives ask in one line whether the blocker cleared rather than assuming.
+
+Lead every brief with the week's stated outcome, so the day's work is visibly in service of something. Then the tasks. Ignore tasks labeled "reference" and anything in the Pit of Doom. Output plain markdown, no headers deeper than bold text, short lines that read well in a phone notification.`;
+
+// context.md holds the plan behind the plan. It is optional; briefs still work without it.
+let CONTEXT = "";
+try {
+  const fs = await import("node:fs");
+  for (const p of ["context.md", "./context.md"]) {
+    if (fs.existsSync(p)) { CONTEXT = fs.readFileSync(p, "utf8").slice(0, 9000); break; }
+  }
+} catch (e) { console.error("context.md not loaded:", e.message); }
+
+const SYSTEM = GSD_SYSTEM + (CONTEXT
+  ? `\n\n--- BACKGROUND: the plan behind the plan. Use it to make the brief specific and grounded, and to explain a task in half a line where a reminder helps. Never quote it at length or pad the brief with it. ---\n${CONTEXT}`
+  : "");
+
+function taskSummary(tasks, state) {
+  const { projById, sectById, pit } = state;
   return tasks
     .filter(t => !isIgnored(t, pit))
     .map(t => ({
       id: t.id,
       task: t.content,
       project: projById[t.project_id]?.name || "?",
+      section: t.section_id ? (sectById[t.section_id]?.name || null) : null,
       priority: `p${5 - t.priority}`, // API 4 = p1
       due: t.due?.date || null,
       recurring: !!t.due?.is_recurring,
       strikes: strikeCount(t),
       duration: t.duration ? `${t.duration.amount} ${t.duration.unit}` : null,
-      note: (t.description || "").split("\n")[0].slice(0, 120) || null,
+      note: (t.description || "").split("\n")[0].slice(0, 140) || null,
     }));
 }
 
@@ -212,86 +286,100 @@ async function morning(state) {
   const today = localDate(0);
   const weekday = localWeekday();
   const isMonday = weekday === "Monday";
-  const { pit, projById } = state;
-  await ensureStrikeLabels(state.labels);
+  await ensureLabels(state.labels);
 
   const notes = [];
   await morningMaintenance(state, notes);
 
+  // Re-read after maintenance so rescheduled items are current.
   const fresh = await todoistList("/tasks");
-  const all = taskSummary(fresh, projById, pit);
-  const candidates = all.filter(t => (t.due && t.due <= today) || t.priority === "p1" || t.strikes > 0);
-  const backlog = all.filter(t => !t.due).slice(0, isMonday ? 40 : 20);
+  const freshState = { ...state, tasks: fresh };
+  const all = taskSummary(fresh, freshState);
 
-  const recurringToday = fresh.filter(t => !isIgnored(t, pit) && t.due?.is_recurring);
-  const streaks = computeStreaks(await completedSince(35), recurringToday);
+  // THE ONLY CANDIDATES ARE TASKS ACTUALLY DUE. No padding, ever.
+  const due = all.filter(t => t.due && t.due <= today);
+  const offers = all.filter(t => !t.due).slice(0, isMonday ? 25 : 8);
+  const shape = planShape(freshState);
 
-  const monday = isMonday ? `
+  const recurringOpen = fresh.filter(t => !isIgnored(t, state.pit) && t.due?.is_recurring);
+  const streaks = computeStreaks(await completedSince(35), recurringOpen);
 
-This is MONDAY, so open the week first: name the week's one big outcome (infer the strongest candidate from the tasks; frame it as a question he can correct), and point out anything undated in the backlog that deserves a day this week. Then Today's Three as usual. Maximum 220 words total.` : `
+  const mondayBlock = isMonday ? `
 
-Maximum 160 words.`;
+This is MONDAY, so open the week before the day: restate the week's outcome, name the one thing that must be true by Friday, and point out anything undated in the offers list that deserves a day this week. Then the day's tasks. Maximum 240 words.` : `
 
-  const brief = await claude(GSD_SYSTEM, `Morning brief for ${weekday} ${today}. Pick Today's Three from the candidates (fall back to backlog if fewer than three). For each: name, first physical action, estimate. Then one line setting a 90-minute focus target. If any habit streaks are notable, mention them in one line ("writing: 11 days"), and gently flag a broken streak without shame.${monday}
+Maximum 170 words.`;
 
+  const brief = await claude(SYSTEM, `Morning brief for ${weekday} ${today}.
+
+THE WEEK'S OUTCOME (lead with this): ${shape.thisWeek.length ? shape.thisWeek.join(" | ") : "none set"}
+Next up: ${shape.nextWeek ? `${shape.nextWeek.date} — ${shape.nextWeek.outcomes.join(" | ")}` : "nothing further set"}
+Where the work stands: ${shape.shape.join("; ") || "no open work"}
+
+DUE TODAY (${due.length} item${due.length === 1 ? "" : "s"} — recommend from these ONLY): ${JSON.stringify(due)}
+Optional undated offers (mention at most one, only if fewer than three are due): ${JSON.stringify(offers)}
+Habit streaks: ${JSON.stringify(streaks)}
 Maintenance already done: ${notes.length ? notes.join(" ") : "nothing was overdue."}
 
-Candidates: ${JSON.stringify(candidates)}
-Habit streaks: ${JSON.stringify(streaks)}
-Backlog sample: ${JSON.stringify(backlog)}`, isMonday ? 1600 : 1200);
+Write: the week's outcome in one line, then the day's tasks with first actions and estimates, then a focus target line. If a task belongs to a sequence or section, say which, so the day reads as part of the plan rather than a loose list.${mondayBlock}`, isMonday ? 1600 : 1200);
 
   return { title: isMonday ? "GSD week opener" : "GSD morning brief", body: brief + (notes.length ? `\n\n_${notes.join(" ")}_` : "") };
 }
 
 async function midday(state) {
   const today = localDate(0);
-  const { tasks, pit, projById } = state;
-  const open = taskSummary(tasks, projById, pit).filter(t => t.due && t.due <= today);
+  const open = taskSummary(state.tasks, state).filter(t => t.due && t.due <= today);
   const done = (await completedSince(0)).map(i => i.content);
+  const shape = planShape(state);
 
-  const brief = await claude(GSD_SYSTEM, `Afternoon check-in for ${today}. Done so far: ${JSON.stringify(done)}. Still open today: ${JSON.stringify(open)}. Write a checklist-style status (done / not done) and end with exactly one question about what happens next: continue, replan, or stuck. Maximum 80 words.`);
+  const brief = await claude(SYSTEM, `Afternoon check-in for ${today}. Week's outcome: ${shape.thisWeek.join(" | ") || "none set"}. Done so far: ${JSON.stringify(done)}. Still open today: ${JSON.stringify(open)}. Write a checklist-style status (done / not done) and end with exactly one question about what happens next: continue, replan, or stuck. Maximum 80 words.`);
   return { title: "GSD check-in", body: brief };
 }
 
 async function evening(state) {
   const today = localDate(0);
-  const { pit, projById } = state;
   const done = (await completedSince(0)).map(i => i.content);
+  const shape = planShape(state);
 
   const notes = [];
   await eveningMaintenance(state, notes);
 
-  const brief = await claude(GSD_SYSTEM, `Evening review for ${today}. Completed: ${JSON.stringify(done)}. Rolled forward: ${JSON.stringify(notes)}. Summarize what moved in plain terms, no judgment on what didn't. End with: one optional question ("anything worth noting about today?") and the line "Day closed." Maximum 110 words.`);
+  const brief = await claude(SYSTEM, `Evening review for ${today}. Week's outcome: ${shape.thisWeek.join(" | ") || "none set"}. Completed: ${JSON.stringify(done)}. Rolled forward: ${JSON.stringify(notes)}. Summarize what moved in plain terms and whether the week's outcome is still on track, with no judgment on what didn't move. End with: one optional question ("anything worth noting about today?") and the line "Day closed." Maximum 120 words.`);
   return { title: "GSD evening review", body: brief };
 }
 
 async function weekly(state) {
   const today = localDate(0);
-  const { tasks, pit, projById } = state;
+  const { tasks, pit } = state;
+  const shape = planShape(state);
 
   const notes = [];
   await eveningMaintenance(state, notes); // Friday still closes the day properly
 
   const weekDone = (await completedSince(6)).map(i => ({ task: i.content, day: localDayOf(i.completed_at) }));
-  const open = taskSummary(tasks, projById, pit);
+  const open = taskSummary(tasks, state);
   const struck = open.filter(t => t.strikes > 0);
   const pitTasks = pit ? tasks.filter(t => t.project_id === pit.id).map(t => t.content) : [];
   const recurring = tasks.filter(t => !isIgnored(t, pit) && t.due?.is_recurring);
   const streaks = computeStreaks(await completedSince(35), recurring);
 
-  const brief = await claude(GSD_SYSTEM, `WEEKLY REVIEW, Friday ${today}. This is the week's look-back, not a daily brief. Cover, in order:
-1. What actually got done this week, in plain terms (group it, don't list every item).
-2. What's carrying strikes and what that avoidance might be about (one gentle sentence).
-3. The Pit: list its contents and ask the rescue question: does anything down there deserve one more chance, or should it be deleted for good? Rescuing means dragging it out of the Pit in Todoist and giving it a date.
-4. Habit streaks worth naming.
-5. One pattern-level question about the week (energy, timing, what kept collapsing).
-End with "Week closed. See you Monday." Maximum 220 words.
+  const brief = await claude(SYSTEM, `WEEKLY REVIEW, Friday ${today}. This is the week's look-back, not a daily brief. Cover, in order:
+1. The week's stated outcome and whether it actually happened. Be straight about it.
+2. What got done this week, grouped, not itemized.
+3. What's carrying strikes and what that avoidance might be about, in one gentle sentence.
+4. The Pit: list its contents and ask the rescue question, does anything down there deserve one more chance or should it be deleted for good.
+5. Habit streaks worth naming.
+6. Next week's outcome, and the one thing that would make it happen.
+End with "Week closed. See you Monday." Maximum 240 words.
 
+This week's outcome was: ${shape.thisWeek.join(" | ") || "none set"}
+Next week's outcome: ${shape.nextWeek ? `${shape.nextWeek.date} — ${shape.nextWeek.outcomes.join(" | ")}` : "nothing set"}
+Where the work stands: ${shape.shape.join("; ") || "no open work"}
 Completed this week: ${JSON.stringify(weekDone)}
 Carrying strikes: ${JSON.stringify(struck)}
 In the Pit: ${JSON.stringify(pitTasks)}
 Habit streaks: ${JSON.stringify(streaks)}
-Rolled tonight: ${JSON.stringify(notes)}`, 1600);
+Rolled tonight: ${JSON.stringify(notes)}`, 1800);
 
   return { title: "GSD weekly review", body: brief };
 }
