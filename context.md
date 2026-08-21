@@ -68,6 +68,7 @@ Three things shape the communications job:
 - **SHTF.** The day detonated. Say what changed and the afternoon gets rebuilt. The plan changed; you did not fail it.
 - **Avoiding.** Circling a task and drifting. Names the resistance, hands over one physical move of ten minutes or less.
 - **Focus target.** 90 minutes of deliberate work a day. Not eight hours of feeling busy.
+- **Briefing.** The stand-back view, on demand from the dashboard. Where you are against the week's outcome, what moved in the last seven days, what the next week or so holds including any overloaded day, and at most three things that deserve attention now. Ask follow-up questions straight after it.
 
 ## How to coach Gareth
 

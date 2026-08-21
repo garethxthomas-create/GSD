@@ -68,6 +68,11 @@
   <div class="btnrow"><button class="primary" onclick="saveConfig()">Save</button></div>
 </div>
 
+<div class="btnrow" style="margin-top:10px">
+  <button class="primary" id="briefBtn" onclick="briefing()">Briefing</button>
+  <button onclick="jumpToAsk()">Ask</button>
+</div>
+
 <div class="card" id="weekCard" style="border-left:3px solid var(--accent)">
   <div class="muted" style="font-size:11px; letter-spacing:1px; text-transform:uppercase">This week</div>
   <div id="weekOutcome" style="font-weight:600; margin-top:3px">&hellip;</div>
@@ -143,7 +148,7 @@
 <script>
 const LS = "gsd_config";
 let cfg = JSON.parse(localStorage.getItem(LS) || "{}");
-let allTasks = [], refTasks = [], projects = {}, sections = {}, outcomes = [], pitId = null;
+let allTasks = [], refTasks = [], pitTasks = [], projects = {}, sections = {}, outcomes = [], pitId = null;
 let ctxDoc = "", askHistory = [];
 let three = [], currentTask = null, plan = null;
 
@@ -225,6 +230,7 @@ async function loadTasks() {
     outcomes = tasks.filter(t => t.labels.includes("outcome") && t.due && t.due.date)
       .sort((a, b) => (a.due.date < b.due.date ? -1 : 1));
     refTasks = tasks.filter(t => t.labels.includes("reference"));
+    pitTasks = tasks.filter(t => t.project_id === pitId);
     allTasks = tasks.filter(t => !ignored(t));
     pickThree();
     render();
@@ -495,6 +501,98 @@ function ask() {
   if (!q) return;
   $("askInput").value = "";
   askClaude(q);
+}
+
+function jumpToAsk() {
+  $("askCard").scrollIntoView({ behavior: "smooth", block: "start" });
+  setTimeout(() => $("askInput").focus(), 400);
+}
+
+// ---- Briefing: the stand-back view ----
+const durationMins = t => !t.duration ? 0 : (t.duration.unit === "day" ? t.duration.amount * 480 : t.duration.amount);
+
+async function completedLast(days) {
+  try {
+    const since = new Date(Date.now() - days * 86400000).toLocaleDateString("en-CA") + "T00:00:00";
+    const until = new Date(Date.now() + 86400000).toLocaleDateString("en-CA") + "T00:00:00";
+    const r = await td(`/tasks/completed/by_completion_date?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}&limit=200`);
+    return (r.results || r.items || []).map(i => ({ task: i.content, day: (i.completed_at || "").slice(0, 10) }));
+  } catch (e) { return []; }
+}
+
+function focusHistory(days = 7) {
+  const out = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const key = new Date(Date.now() - i * 86400000).toLocaleDateString("en-CA");
+    out.push({ day: key, minutes: Math.round(Number(localStorage.getItem("gsd_focus_" + key) || 0) / 60) });
+  }
+  return out;
+}
+
+function upcomingByDay(days = 14) {
+  const out = [];
+  for (let i = 0; i <= days; i++) {
+    const d = new Date(Date.now() + i * 86400000);
+    const key = d.toLocaleDateString("en-CA");
+    const items = allTasks.filter(t => t.due && t.due.date === key);
+    const marks = outcomes.filter(o => o.due.date === key).map(o => cleanOutcome(o.content));
+    if (!items.length && !marks.length) continue;
+    out.push({
+      date: key,
+      day: d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" }),
+      week_marker: marks.length ? marks : undefined,
+      load_minutes: items.reduce((s, t) => s + durationMins(t), 0) || undefined,
+      tasks: items.map(t => ({
+        task: t.content,
+        project: projects[t.project_id],
+        section: t.section_id ? sections[t.section_id]?.name : null,
+        priority: "p" + (5 - t.priority),
+        minutes: durationMins(t) || undefined,
+      })),
+    });
+  }
+  return out;
+}
+
+async function briefing() {
+  if (!cfg.anthropic) { toggleSettings(); return; }
+  $("briefBtn").innerHTML = '<span class="spin">&#8635;</span>';
+  const t0 = today();
+  const payload = {
+    today: t0,
+    done_last_7_days: await completedLast(7),
+    focus_minutes_by_day: focusHistory(7),
+    focus_target_per_day: 90,
+    overdue: allTasks.filter(t => t.due && t.due.date < t0).map(t => ({ task: t.content, due: t.due.date, strikes: strikes(t) })),
+    carrying_strikes: allTasks.filter(t => strikes(t) > 0).map(t => ({ task: t.content, strikes: strikes(t), due: t.due?.date || null })),
+    parked: allTasks.filter(t => (t.description || "").startsWith("⏸")).map(t => ({ task: t.content, reason: (t.description || "").split("\n")[0], due: t.due?.date || null })),
+    in_the_pit: pitTasks.map(t => t.content),
+    upcoming: upcomingByDay(14),
+    still_undated: allTasks.filter(t => !t.due).map(t => t.content).slice(0, 30),
+  };
+  const q = "Give me the briefing: where I am, and what's coming.";
+  askHistory.push({ role: "user", content: q });
+  renderAsk();
+  try {
+    const out = await claudeConvo(groundingSystem(),
+      [{ role: "user", content: `BRIEFING REQUEST. This is a stand-back review, not a daily brief. Write it in four short parts, using bold labels:
+
+**Where you are.** The week's stated outcome and whether it is genuinely on track. Be straight about it, without shame.
+**What moved.** The last seven days, grouped rather than itemized. Bring in focus minutes and streaks only if they actually say something.
+**What's coming.** The next seven to ten days as a short narrative, not a list dump. Name the days that matter and why. Flag any day that is overloaded, and any deadline that needs work to START before it rather than on it.
+**What deserves attention now.** At most three things: anything slipping, parked, or carrying strikes. One concrete move each.
+
+Around 300 words. Specific to this plan, never generic.
+
+THE DATA:
+${JSON.stringify(payload)}` }], 1600);
+    askHistory.push({ role: "assistant", content: out });
+  } catch (e) {
+    askHistory.push({ role: "assistant", content: "Briefing failed: " + e.message });
+  }
+  renderAsk();
+  $("briefBtn").textContent = "Briefing";
+  jumpToAsk();
 }
 
 async function explainTask(id) {
